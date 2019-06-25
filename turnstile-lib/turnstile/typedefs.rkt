@@ -4,7 +4,7 @@
 ;; - this lib experiments with alternatives to similar forms in typecheck-core
 ;; - currently used by `dep` examples and Cur lang
 
-(require (for-syntax "more-utils.rkt"))
+(require (for-syntax "more-utils.rkt" syntax/id-table))
 
 (provide define-type (for-syntax (all-defined-out)))
 
@@ -18,35 +18,60 @@
   ;; - `resugar` can be more aggressive than `unexpand`,
   ;;    eg showing nested binders as a flat list, bc it wont be expanded again
   ;; - unexpand fn must return list of stx objs, not a stx obj
-  (struct type-info (match resugar unexpand) #:omit-define-syntaxes)
+  ;  (struct type-info (match resugar unexpand) #:omit-define-syntaxes)
+  (define-syntax type-info ; for backwards compat
+    (syntax-parser
+      [(_ #;match-fn resugar-fn unexpand-fn rst ...)
+       #'(make-free-id-table
+          (hash ;#'get-datatype-def match-fn
+                #'get-resugar-info resugar-fn
+                #'get-unexpand-info unexpand-fn
+                #'rst ... ; wrap each with "#'"
+                ))]))
 
+  (define-syntax define-generic-type-method
+    (syntax-parser
+      [(_ name)
+       #'(define name
+           (syntax-parser
+             [(_ (~var TY+ id) . _)
+              (dict-ref (eval-syntax #'TY+) #'name)]))]))
+
+  (define-generic-type-method get-datatype-def)
+  (define-generic-type-method get-resugar-info)
+  (define-generic-type-method get-unexpand-info)
+
+  
   ;; queries whether stx has associated type info
   (define has-type-info?
     (syntax-parser
-      [(_ TY+:id . _) (with-handlers ([exn? (λ _ #f)]) (type-info? (eval-syntax #'TY+)))]
+      [(_ TY+:id . _) (with-handlers ([exn? (λ _ #f)]) (dict? (eval-syntax #'TY+)))]
       [_ #f]))
 
   ;; get-type-info: consumes expanded type with shape (#%plain-app TY:id . rst)
   ;; - returns info useful for pattern matching
-  (define get-match-info
+  (define get-match-info get-datatype-def) ; backwards compat
+#;  (define get-match-info
     (syntax-parser
       [(_ TY+:id . _)
-       (type-info-match (eval-syntax #'TY+))]))
+       (dict-ref (eval-syntax #'TY+) #'get-match-info)]))
 
   ;; get-resugar-info: consumes expanded type with shape (#%plain-app TY:id . rst)
   ;; - returns resugar fn for the type
-  (define get-resugar-info
+#;  (define get-resugar-info
     (syntax-parser
       [(_ TY+:id . _)
-       (type-info-resugar (eval-syntax #'TY+))]
+       (dict-ref (eval-syntax #'TY+) #'get-resugar-info)
+       #;(type-info-resugar (eval-syntax #'TY+))]
       [_ #f]))
 
   ;; get-unexpand-info: consumes expanded type with shape (#%plain-app TY:id . rst)
   ;; - returns unexpand fn for the type
-  (define get-unexpand-info
+#;  (define get-unexpand-info
     (syntax-parser
       [(_ TY+:id . _)
-       (type-info-unexpand (eval-syntax #'TY+))]
+       (dict-ref (eval-syntax #'TY+) #'get-unexpand-info)
+       #;(type-info-unexpand (eval-syntax #'TY+))]
       [_ #f]))
 
   ;; `name` is stx identifier
@@ -110,10 +135,10 @@
 (define-syntax define-type
   (syntax-parser
     [(_ TY:id #:with-binders . rst) (syntax/loc this-syntax (define-binding-type TY . rst))] ; binding type
-    [(_ TY:id (~datum :) k (~optional (~seq #:extra ei ...) #:defaults ([(ei 1) '()])))
-     #'(define-base-type TY : k #:extra ei ...)] ; base type
-    [(_ TY:id (~datum :) (~datum ->) k (~optional (~seq #:extra ei ...) #:defaults ([(ei 1) '()])))
-     #'(define-base-type TY : k #:extra ei ...)] ; base type
+    [(_ TY:id (~datum :) k (~optional (~seq #:implements ei ...) #:defaults ([(ei 1) '()])))
+     #'(define-base-type TY : k #:implements ei ...)] ; base type
+    [(_ TY:id (~datum :) (~datum ->) k (~optional (~seq #:implements ei ...) #:defaults ([(ei 1) '()])))
+     #'(define-base-type TY : k #:implements ei ...)] ; base type
     [(_ TY:id (~datum :)
         ;; [Y Ytag k_out] ... is a telescope
         ;; - with careful double-use of pattern variables (Y ...) in output macro defs,
@@ -127,7 +152,7 @@
                    (~parse (Y ...) (generate-temporaries #'(k_out ...)))
                    (~parse (Ytag ...) (stx-map (λ _ #':) #'(Y ...)))))
         (~datum ->) k
-        (~optional (~seq #:extra ei ...) #:defaults ([(ei 1) '()])))
+        (~optional (~seq #:implements ei ...) #:defaults ([(ei 1) '()])))
      ;; TODO: need to validate k_out and k; what should be their required type?
      ;; - it must be language agnostic?
      #:when (syntax-parse/typecheck null 
@@ -155,18 +180,20 @@
                          (~fail #:unless (free-id=? #'name/internal TY/internal+)))])))
            (define TY/internal
              (type-info
-              #'(ei ...)     ; match info
+;              #'(ei ...)     ; match info
               (syntax-parser ; resugar fn
                 [(TY-expander τ ...)
                  (cons #'TY (stx-map resugar-type #'(τ ...)))])
               (syntax-parser ; unexpand
                 [(TY-expander τ ...)
-                 (cons #'TY (stx-map unexpand #'(τ ...)))])))))]))
+                 (cons #'TY (stx-map unexpand #'(τ ...)))])
+              ei ...
+              ))))]))
 
 ;; base type is separate bc the expander must accommodate id case
 (define-syntax define-base-type
   (syntax-parser
-    [(_ TY:id (~datum :) k (~optional (~seq #:extra ei ...) #:defaults ([(ei 1) '()])))
+    [(_ TY:id (~datum :) k (~optional (~seq #:implements ei ...) #:defaults ([(ei 1) '()])))
      #:when (syntax-parse/typecheck null 
              [_ ≫ [⊢ k ≫ _ ⇒ _] --- [≻ (void)]])
      #:with TY/internal (fresh #'TY)
@@ -196,13 +223,15 @@
                     other-pat (... ...))])))
            (define TY/internal
              (type-info
-              #'(ei ...)     ; match info
+;              #'(ei ...)     ; match info
               (syntax-parser ; resugar fn
                 [TY-expander #'TY]
                 [(TY-expander) (list #'TY)])
               (syntax-parser ; unexpand fn
                 [TY-expander #'TY]
-                [(TY-expander) (list #'TY)])))))]))
+                [(TY-expander) (list #'TY)])
+              ei ...
+              ))))]))
 
 (define-typed-syntax (define-binding-type TY:id [X:id Xtag:id k_in] (~datum :) k_out (~datum ->) k) ≫
   ;; TODO: need to validate k_in, k_out, and k; what should be their required type?
@@ -237,7 +266,7 @@
                        (~fail #:unless (free-id=? #'name/internal TY/internal+)))])))
          (define TY/internal
            (type-info
-            #f             ; match info
+;            #f             ; match info
             ;; this must return list not stx obj, ow ctx (for #%app) will be wrong
             ;; in other words, *caller* must create stx obj
             (syntax-parser ; resugar-fn
